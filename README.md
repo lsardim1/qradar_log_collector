@@ -498,4 +498,4 @@ Correções baseadas em validação rigorosa externa ([deep-research-report](dee
 
 ## Licença
 
-Uso interno — script utilitário para assessment de migração QRadar → Microsoft Sentinel.
+Este projeto é licenciado sob a [MIT License](LICENSE).
