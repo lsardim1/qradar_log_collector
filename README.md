@@ -1,0 +1,1 @@
+# qradar_log_collector
