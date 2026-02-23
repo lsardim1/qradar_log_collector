@@ -249,6 +249,10 @@ Na inicialização, o script também coleta o inventário completo de log source
 4. Relatório final         → Gera CSV + TXT ao encerrar
 ```
 
+Os dados são salvos no SQLite (`qradar_metrics.db`) **a cada ciclo de coleta**. Se o script for interrompido por qualquer motivo (queda de energia, fechamento do terminal, crash), todos os dados coletados até aquele momento estão preservados e podem ser extraídos com `--report-only`.
+
+> **Dica:** Como o script roda por vários dias, é altamente recomendável executá-lo em uma sessão que não feche ao desconectar — ex: `screen` ou `tmux` no Linux, ou como tarefa em background no Windows.
+
 ### Janelas contíguas sem sobreposição
 
 O script mantém janelas **contíguas** usando epoch em milissegundos:
@@ -299,7 +303,7 @@ Ao final da coleta (ou via `--report-only`), três arquivos são gerados em `rep
 
 ### 1. `qradar_daily_report_<timestamp>.csv`
 
-Detalhamento granular, dia a dia, por data source:
+Detalhamento granular, dia a dia, por data source. Útil para investigar picos de ingestão em dias específicos:
 
 | Coluna | Descrição |
 |---|---|
@@ -313,7 +317,7 @@ Detalhamento granular, dia a dia, por data source:
 
 ### 2. `qradar_summary_report_<timestamp>.csv`
 
-Resumo consolidado com médias diárias (ideal para sizing):
+Resumo consolidado em CSV (separado por ponto e vírgula `;`, pronto para abrir no Excel). Ideal para sizing:
 
 | Coluna | Descrição |
 |---|---|
@@ -326,11 +330,11 @@ Resumo consolidado com médias diárias (ideal para sizing):
 
 ### 3. `qradar_full_report_<timestamp>.txt`
 
-Relatório completo formatado em texto, contendo:
+Relatório completo formatado em texto, fácil de ler. Contém:
 - Informações da coleta (período, total de execuções)
 - Detalhamento diário com tabelas por dia
 - Resumo de médias diárias por data source
-- **Estimativa de volume mensal** (projeção 30 dias — dado principal para sizing do Sentinel)
+- **Estimativa de volume mensal** (projeção 30 dias — **o dado mais importante para o sizing do Sentinel**)
 
 ```
 ====================================================================================================
@@ -457,7 +461,7 @@ python -m unittest test_qradar_log_collector -v
 | `AQL com unparsed falhou; fazendo fallback` | Campo `isunparsed` indisponível no QRadar | **Normal** — o script continua sem métricas de unparsed |
 | `Query AQL timeout` | QRadar sobrecarregado ou intervalo muito grande | Aumente `AQL_TIMEOUT_SECONDS` no código ou reduza `--interval` |
 | `Catch-up excedeu limite` | Falhas consecutivas acumularam gap > 3 intervalos | Dados do gap são perdidos (registrado no log); coleta continua |
-| Script parou/crashou | Queda de energia, terminal fechado, etc. | Dados salvos no SQLite — rode `--report-only` para extrair relatórios |
+| Script parou/crashou — perdi tudo? | Queda de energia, terminal fechado, crash | **Não.** Dados salvos no SQLite — rode `--report-only` na mesma pasta para extrair relatórios de tudo que foi coletado |
 | Dados vazios / sem resultados | Nenhum evento no período, ou log sources desativados | Verifique no QRadar se há eventos no período; use `--verbose` |
 
 ---
