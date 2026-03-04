@@ -289,7 +289,9 @@ class QRadarClient:
                 "config/event_sources/log_source_management/log_source_types", page_size=1000
             )
             for t in types_list:
-                types_map[t.get("id")] = t.get("name", f"Unknown-{t.get('id')}")
+                type_id = t.get("id")
+                if type_id is not None:
+                    types_map[type_id] = t.get("name", f"Unknown-{type_id}")
         except Exception as e:
             logger.warning(f"Não foi possível obter tipos de log source: {e}")
         return types_map
@@ -316,7 +318,10 @@ class QRadarClient:
                 logger.error(f"Timeout aguardando query AQL {search_id}")
                 return None
 
-            status = self._get(f"ariel/searches/{search_id}")
+            status = self._get(
+                f"ariel/searches/{search_id}",
+                extra_headers={"Prefer": "wait=10"},
+            )
             progress = status.get("progress", 0)
             query_status = status.get("status", "UNKNOWN")
 
@@ -677,7 +682,7 @@ class MetricsDB:
         tornando a projeção diária matematicamente correta.
         """
         cursor = self.conn.cursor()
-        cursor.execute("SELECT logsource_id, name, type_name FROM log_sources_inventory")
+        cursor.execute("SELECT logsource_id, name, type_name FROM log_sources_inventory WHERE enabled = 1")
         inventory = cursor.fetchall()
 
         zero_count = 0
@@ -714,8 +719,9 @@ class MetricsDB:
         cursor.execute("""
             SELECT 
                 collection_date,
-                logsource_name,
-                logsource_type,
+                logsource_id,
+                MAX(logsource_name) as logsource_name,
+                MAX(logsource_type) as logsource_type,
                 SUM(total_event_count) as total_events,
                 SUM(aggregated_event_count) as aggregated_events,
                 SUM(unparsed_total_events) as unparsed_total_events,
@@ -728,7 +734,7 @@ class MetricsDB:
                 COUNT(DISTINCT collection_time) as collection_count,
                 SUM(window_seconds) as covered_seconds
             FROM event_metrics
-            GROUP BY collection_date, logsource_name, logsource_type
+            GROUP BY collection_date, logsource_id
             ORDER BY collection_date, total_events DESC
         """)
         columns = [desc[0] for desc in cursor.description]
@@ -739,12 +745,16 @@ class MetricsDB:
 
         Para tornar a métrica mais fiel quando há falhas/lacunas, calcula a projeção para 24h baseada no tempo
         efetivamente coberto (soma de window_seconds).
+
+        Agrupa por logsource_id (não por nome) para evitar mistura quando
+        fontes compartilham o mesmo nome ou são renomeadas durante a coleta.
         """
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT 
-                logsource_name,
-                logsource_type,
+                logsource_id,
+                MAX(logsource_name) as logsource_name,
+                MAX(logsource_type) as logsource_type,
                 COUNT(DISTINCT collection_date) as days_collected,
 
                 ROUND(AVG(projected_daily_events), 2) as avg_daily_events,
@@ -760,8 +770,9 @@ class MetricsDB:
             FROM (
                 SELECT 
                     collection_date,
-                    logsource_name,
-                    logsource_type,
+                    logsource_id,
+                    MAX(logsource_name) as logsource_name,
+                    MAX(logsource_type) as logsource_type,
                     SUM(total_event_count) as daily_events,
                     SUM(aggregated_event_count) as daily_aggregated_events,
                     SUM(unparsed_total_events) as daily_unparsed_events,
@@ -776,9 +787,9 @@ class MetricsDB:
                     CASE WHEN SUM(window_seconds) > 0 THEN (SUM(unparsed_total_events) * 86400.0 / SUM(window_seconds)) ELSE SUM(unparsed_total_events) END as projected_daily_unparsed_events,
                     CASE WHEN SUM(window_seconds) > 0 THEN (SUM(total_payload_bytes) * 86400.0 / SUM(window_seconds)) ELSE SUM(total_payload_bytes) END as projected_daily_bytes
                 FROM event_metrics
-                GROUP BY collection_date, logsource_name, logsource_type
+                GROUP BY collection_date, logsource_id
             ) daily
-            GROUP BY logsource_name, logsource_type
+            GROUP BY logsource_id
             ORDER BY avg_daily_bytes_total DESC
         """)
         columns = [desc[0] for desc in cursor.description]
@@ -794,6 +805,19 @@ class MetricsDB:
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM collection_runs")
         return cursor.fetchone()[0]
+
+    def update_collection_run_status(self, run_id: int, status: str) -> None:
+        """Atualiza o status de uma collection_run (ex: 'failed').
+
+        Usado para marcar corridas que falharam na consulta ao SIEM,
+        permitindo distinguir coletas bem-sucedidas de falhas no relatório.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE collection_runs SET status = ? WHERE run_id = ?",
+            (status, run_id),
+        )
+        self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -842,6 +866,7 @@ class ReportGenerator:
             writer = csv.writer(f, delimiter=";")
             writer.writerow([
                 "Data",
+                "Source ID",
                 "Log Source",
                 "Tipo Log Source",
                 "Total Eventos (SUM(eventcount))",
@@ -861,6 +886,7 @@ class ReportGenerator:
                 total_bytes = row.get("total_bytes", 0) or 0
                 writer.writerow([
                     row["collection_date"],
+                    row.get("logsource_id", ""),
                     row["logsource_name"],
                     row["logsource_type"],
                     int(row.get("total_events", 0) or 0),
@@ -886,6 +912,7 @@ class ReportGenerator:
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
             writer.writerow([
+                "Source ID",
                 "Log Source",
                 "Tipo Log Source",
                 "Dias Coletados",
@@ -901,6 +928,7 @@ class ReportGenerator:
             for row in summary:
 
                 writer.writerow([
+                    row.get("logsource_id", ""),
                     row["logsource_name"],
                     row["logsource_type"],
                     row["days_collected"],
@@ -1067,7 +1095,8 @@ def run_collection_cycle(
         if error_counter:
             error_counter.inc("aql_query_failed")
         logger.error(f"Falha ao coletar métricas via AQL: {exc}")
-        return 0
+        db.update_collection_run_status(run_id, "failed")
+        return -1  # Sinaliza falha; caller NÃO deve avançar last_window_end_ms
 
     seen_ids: set = set()
     ds_count = 0
@@ -1332,7 +1361,13 @@ Exemplos de uso:
                 error_counter=error_counter,
             )
             collection_count += 1
-            last_window_end_ms = window_end_ms
+
+            # Só avança a janela se a coleta teve sucesso (ds_count >= 0).
+            # ds_count == -1 indica falha na query; catch-up no próximo ciclo.
+            if ds_count >= 0:
+                last_window_end_ms = window_end_ms
+            else:
+                logger.info("Query falhou — janela será re-tentada no próximo ciclo (catch-up).")
 
             remaining_seconds = max(0.0, end_monotonic - time.monotonic())
             remaining_hours = remaining_seconds / 3600.0
