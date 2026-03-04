@@ -25,12 +25,62 @@ Roda continuamente por N dias (padrão: **6**), coleta métricas a cada interval
 
 ---
 
+## Arquitetura do QRadar — Onde Conectar
+
+> **IMPORTANTE:** O script DEVE se conectar ao **Console (Manager)** do QRadar, e NÃO a um Event Processor ou Event Collector individual.
+
+O IBM QRadar possui uma arquitetura distribuída com múltiplos componentes:
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Console / Manager (All-in-One)          │
+│  ┌─────────────┐  ┌──────────┐  ┌────────────────┐  │
+│  │  API REST    │  │  Ariel   │  │  Inventário    │  │
+│  │  (porta 443) │  │  (dados  │  │  global de     │  │
+│  │              │  │  de TODOS│  │  log sources)  │  │
+│  │  ◄── CONECTE │  │  os EPs) │  │                │  │
+│  │      AQUI    │  │          │  │                │  │
+│  └─────────────┘  └──────────┘  └────────────────┘  │
+└──────────┬──────────────┬───────────────┬────────────┘
+           │              │               │
+    ┌──────▼──────┐ ┌─────▼──────┐ ┌──────▼──────┐
+    │  Event      │ │  Event     │ │  Event      │
+    │  Processor 1│ │  Processor 2│ │  Processor N│
+    │  (subset de │ │  (subset de│ │  (subset de │
+    │   fontes)   │ │   fontes)  │ │   fontes)   │
+    └──────▲──────┘ └─────▲──────┘ └──────▲──────┘
+           │              │               │
+    ┌──────┴──────┐ ┌─────┴──────┐ ┌──────┴──────┐
+    │  Event      │ │  Event     │ │  Event      │
+    │  Collector 1│ │  Collector 2│ │  Collector N│
+    │  (recebe    │ │  (recebe   │ │  (recebe    │
+    │   syslog)   │ │   syslog)  │ │   syslog)   │
+    └─────────────┘ └────────────┘ └─────────────┘
+```
+
+**Por que conectar no Console/Manager?**
+
+| Componente | Inventário de log sources | Dados AQL (eventos) | Usar para coleta? |
+|---|---|---|---|
+| **Console (Manager)** | Retorna **TODAS** as fontes | Consulta dados de **TODOS** os Event Processors | **SIM** |
+| Event Processor | Retorna TODAS as fontes (inventário é global) | Consulta **APENAS** dados locais daquele EP | **NÃO** |
+| Event Collector | Sem API REST | Sem acesso AQL | **NÃO** |
+
+Se você conectar em um Event Processor em vez do Console, o inventário de log sources retornará todas as fontes (é global), mas a query AQL só retornará eventos processados **localmente naquele EP**. Isso resulta em milhares de log sources aparecendo com zero eventos — quando na verdade os dados existem em outros EPs.
+
+**Como identificar o Console:**
+- É o host onde você acessa o **dashboard web** do QRadar
+- Normalmente é o servidor indicado na documentação como "Console" ou "All-in-One"
+- No QRadar: **Admin → System and License Management** — o Console aparece com o papel "Console"
+
+---
+
 ## Pré-requisitos
 
 ### Ambiente de Execução
 - **Python 3.8+** (recomendado 3.10+)
 - **Módulo `requests`** para HTTP
-- Acesso de rede (HTTPS/443) da máquina de execução até o console do IBM QRadar
+- Acesso de rede (HTTPS/443) da máquina de execução até o **Console (Manager)** do IBM QRadar
 - Sessão persistente recomendada (`screen`, `tmux` no Linux, ou tarefa em background no Windows)
 
 ### Credenciais do QRadar (API Token SEC)
@@ -483,12 +533,30 @@ python -m unittest test_qradar_log_collector -v
 | `Catch-up excedeu limite` | Falhas consecutivas acumularam gap > 3 intervalos | Dados do gap são perdidos (registrado no log); coleta continua |
 | Script parou/crashou — perdi tudo? | Queda de energia, terminal fechado, crash | **Não.** Dados salvos no SQLite — rode `--report-only` na mesma pasta para extrair relatórios de tudo que foi coletado |
 | Dados vazios / sem resultados | Nenhum evento no período, ou log sources desativados | Verifique no QRadar se há eventos no período; use `--verbose` |
+| Milhares de fontes com zero eventos | Script conectado a um **Event Processor** em vez do **Console** | A `--url` deve apontar para o **Console/Manager** do QRadar (ver seção [Arquitetura](#arquitetura-do-qradar--onde-conectar)) |
+| Fontes desabilitadas no relatório | Bug do zero-fill sem filtro `enabled=1` (corrigido na v3) | Atualize para a v3.0 — fontes desabilitadas não aparecem mais |
 
 ---
 
 ## Changelog
 
-### v2.0 (2026-02-23) — Versão atual
+### v3.0 (2026-03-04) — Versão atual
+
+Auditoria completa e correção de bugs críticos identificados por comparação com a versão refatorada multi-SIEM:
+
+| Correção | Impacto |
+|---|---|
+| **AQL result pagination** — paginação automática em blocos de 50k (era limitado a 10k sem aviso) | Ambientes com >10k log sources agora retornam todos os dados |
+| **Falha AQL retorna -1** — loop principal não avança janela em caso de erro | Elimina perda silenciosa de dados quando a query falha |
+| **Zero-fill com `WHERE enabled=1`** — exclui fontes desabilitadas | Relatórios não são mais inflados com milhares de fontes fantasma |
+| **GROUP BY `logsource_id`** em vez de `logsource_name` | Fontes com nomes duplicados ou renomeadas não misturam dados |
+| **`update_collection_run_status()`** — marca corridas que falharam | Distingue coletas bem-sucedidas de falhas no banco de dados |
+| **`Prefer: wait=10`** no polling AQL | Reduz round-trips; detecção mais rápida de query completada |
+| **Proteção contra `None` em `type_id`** | Evita `KeyError` em tipos sem ID |
+| **Coluna `Source ID`** nos CSVs diário e summary | Identificação unambígua de cada log source |
+| **Seção de arquitetura QRadar** no README | Documenta a necessidade de conectar no Console/Manager |
+
+### v2.0 (2026-02-23)
 
 Correções baseadas em validação rigorosa externa ([deep-research-report](deep-research-report.md)):
 

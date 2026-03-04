@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-QRadar Log Ingestion Collector
-===============================
+QRadar Log Ingestion Collector v3.0
+====================================
 Script para coletar informações de ingestão de logs do IBM QRadar via REST API.
 Roda continuamente por N dias (padrão: 6), coleta métricas a cada intervalo
 configurável e gera relatório final com médias diárias por data source.
 
+IMPORTANTE: Conecte SEMPRE ao Console/Manager do QRadar (não a um Event Processor).
+Veja README.md seção 'Arquitetura do QRadar' para detalhes.
+
 Autor: Leandro Sardim
 Data: 2026-02-23
+Versão: 3.0 (2026-03-04)
 """
 
 import argparse
